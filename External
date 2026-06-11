@@ -172,7 +172,7 @@ def build_pdf(rows, out_path):
     story = []
     story.append(Paragraph(date.today().strftime("%B %d, %Y"), title_style))
     story.append(Paragraph(
-        "Route 53 .gov A-Record IPv4 Inventory", subtitle_style))
+        "Public Facing IPs (.gov)", subtitle_style))
     story.append(Spacer(1, 16))
 
     data = [["Record", "IPv4", "CIDR"]]
