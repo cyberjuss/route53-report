@@ -391,8 +391,8 @@ def run_report(output_dir, s3_bucket=None, prefix="reports",
     build_index_pdf(produced, index_pdf_path)
     write_index_csv(produced, index_csv_path)
 
-    index_pdf_key = f"{prefix}/{index_base}.pdf"
-    index_csv_key = f"{prefix}/{index_base}.csv"
+    index_pdf_key = f"{prefix}/_index/{index_base}.pdf"
+    index_csv_key = f"{prefix}/_index/{index_base}.csv"
 
     if upload and s3_bucket:
         upload_to_s3(file_path=index_pdf_path, bucket=s3_bucket, key=index_pdf_key)
