@@ -216,7 +216,8 @@ def upload_to_s3(file_path, bucket, key):
 
 # ---------------------------------------------------------------- Core Workflow
 
-def run_report(output_pdf, output_csv, s3_bucket=None, s3_key=None, upload=True):
+def run_report(output_pdf, output_csv, s3_bucket=None,
+               s3_pdf_key=None, s3_csv_key=None, upload=True):
     print("[*] Starting Route 53 .gov DNS inventory report")
 
     rows = fetch_from_aws()
@@ -243,7 +244,8 @@ def run_report(output_pdf, output_csv, s3_bucket=None, s3_key=None, upload=True)
     build_pdf(grouped, output_pdf)
 
     if upload and s3_bucket:
-        upload_to_s3(file_path=output_pdf, bucket=s3_bucket, key=s3_key)
+        upload_to_s3(file_path=output_pdf, bucket=s3_bucket, key=s3_pdf_key)
+        upload_to_s3(file_path=output_csv, bucket=s3_bucket, key=s3_csv_key)
 
     print("[+] Report completed successfully")
 
@@ -252,7 +254,8 @@ def run_report(output_pdf, output_csv, s3_bucket=None, s3_key=None, upload=True)
         "gov_domains": len(grouped),
         "gov_records": total_records,
         "s3_bucket": s3_bucket,
-        "s3_key": s3_key,
+        "s3_pdf_key": s3_pdf_key,
+        "s3_csv_key": s3_csv_key,
         "pdf": output_pdf,
         "csv": output_csv,
     }
@@ -262,13 +265,16 @@ def run_report(output_pdf, output_csv, s3_bucket=None, s3_key=None, upload=True)
 
 def lambda_handler(event, context):
     s3_bucket = os.environ["S3_BUCKET"]
-    s3_key = os.environ.get("S3_KEY", "reports/gov_dns_report.pdf")
+    prefix = os.environ.get("S3_PREFIX", "reports")
+
+    stamp = date.today().strftime("%Y-%m-%d")
 
     return run_report(
-        output_pdf="/tmp/gov_dns_report.pdf",
-        output_csv="/tmp/route53_records.csv",
+        output_pdf=f"/tmp/route53_records_{stamp}.pdf",
+        output_csv=f"/tmp/route53_records_{stamp}.csv",
         s3_bucket=s3_bucket,
-        s3_key=s3_key,
+        s3_pdf_key=f"{prefix}/route53_records_{stamp}.pdf",
+        s3_csv_key=f"{prefix}/route53_records_{stamp}.csv",
         upload=True,
     )
 
@@ -279,13 +285,16 @@ if __name__ == "__main__":
     # Replace the placeholder below with your real bucket name, or override
     # it at runtime with:  export S3_BUCKET=my-bucket-name
     bucket = os.environ.get("S3_BUCKET", "REPLACE_WITH_YOUR_BUCKET_NAME")
-    key = os.environ.get("S3_KEY", "reports/gov_dns_report.pdf")
+    prefix = os.environ.get("S3_PREFIX", "reports")
+
+    stamp = date.today().strftime("%Y-%m-%d")
 
     result = run_report(
-        output_pdf="gov_dns_report.pdf",
-        output_csv="route53_records.csv",
+        output_pdf=f"route53_records_{stamp}.pdf",
+        output_csv=f"route53_records_{stamp}.csv",
         s3_bucket=bucket,
-        s3_key=key,
+        s3_pdf_key=f"{prefix}/route53_records_{stamp}.pdf",
+        s3_csv_key=f"{prefix}/route53_records_{stamp}.csv",
         upload=bool(bucket),
     )
 
