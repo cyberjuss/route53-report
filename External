@@ -10,6 +10,19 @@ Runs both locally (python3 external_ips.py) and as an AWS Lambda
 (handler = external_ips.lambda_handler).
 """
 
+#!/usr/bin/env python3
+"""
+Route 53 .gov A-Record IPv4 Inventory
+=====================================
+Pulls every .gov A record from Route 53, performs a live nslookup on each
+record name, and reports the resolved IPv4 addresses. Each IP is tagged
+external (public / internet-routable) or internal (private), which is the
+key distinction for attack-surface review.
+
+Runs locally (python3 external_ips.py) or as Lambda
+(handler = external_ips.lambda_handler).
+"""
+
 import csv
 import ipaddress
 import os
@@ -27,33 +40,22 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 
 # ---------------------------------------------------------------- Config
 
-# Inventory names ending in any of these suffixes (both are public-facing).
-ALLOWED_SUFFIXES = (".gov", ".com")
+DOMAIN_SUFFIX = ".gov"            # .gov only
+socket.setdefaulttimeout(3)       # per-lookup DNS timeout
 
-# Suffixes that are private / non-routable and never external-facing.
-EXCLUDED_SUFFIXES = (".internal",)
-
-# Keep only globally-routable (public) IPs. Drops anything in the
-# private RFC 1918 ranges (10.x, 172.16-31.x, 192.168.x), loopback, etc.
-PUBLIC_ONLY = True
-
-# Per-lookup DNS timeout in seconds, so a slow name can't hang the run.
-socket.setdefaulttimeout(3)
-
-CSV_FIELDS = ["record_name", "ipv4"]
+CSV_FIELDS = ["record_name", "ipv4", "scope"]
 
 
 # ---------------------------------------------------------------- Route 53
 
 def fetch_a_record_names():
-    """Return a de-duplicated list of A-record names from Route 53."""
+    """Return a de-duplicated list of .gov A-record names."""
     r53 = boto3.client("route53")
 
     seen = set()
     names = []
 
     zone_pages = r53.get_paginator("list_hosted_zones").paginate()
-
     for zone_page in zone_pages:
         for zone in zone_page["HostedZones"]:
             zone_id = zone["Id"].split("/")[-1]
@@ -64,22 +66,14 @@ def fetch_a_record_names():
 
             for rec_page in rec_pages:
                 for rec in rec_page["ResourceRecordSets"]:
-
-                    # Only A records.
                     if rec["Type"] != "A":
                         continue
 
                     name = rec["Name"].rstrip(".").replace("\\052", "*")
-                    lower = name.lower()
 
-                    if not lower.endswith(ALLOWED_SUFFIXES):
+                    if not name.lower().endswith(DOMAIN_SUFFIX):
                         continue
-
-                    if lower.endswith(EXCLUDED_SUFFIXES):
-                        continue
-
-                    # Wildcards (*.example.gov) can't be resolved directly.
-                    if "*" in name:
+                    if "*" in name:          # wildcards can't be resolved
                         continue
 
                     if name not in seen:
@@ -89,40 +83,39 @@ def fetch_a_record_names():
     return names
 
 
-# ---------------------------------------------------------------- nslookup
+# ---------------------------------------------------------------- nslookup + classify
 
 def resolve_ipv4(name):
-    """Forward DNS lookup. Returns a sorted list of public IPv4 strings."""
+    """Forward DNS lookup -> sorted unique IPv4 list (or [] on failure)."""
     try:
         _, _, ips = socket.gethostbyname_ex(name)
+        return sorted(set(ips))
     except (socket.gaierror, socket.timeout, OSError):
         return []
 
-    out = []
-    for ip in sorted(set(ips)):
-        if PUBLIC_ONLY:
-            try:
-                if not ipaddress.ip_address(ip).is_global:
-                    continue
-            except ValueError:
-                continue
-        out.append(ip)
 
-    return out
+def scope_of(ip):
+    """external = publicly routable, internal = private/reserved."""
+    try:
+        return "external" if ipaddress.ip_address(ip).is_global else "internal"
+    except ValueError:
+        return "internal"
 
 
 def build_rows(names):
-    """Resolve every name (in parallel) into flat {record_name, ipv4} rows."""
     rows = []
-
     with ThreadPoolExecutor(max_workers=20) as pool:
-        results = list(pool.map(lambda n: (n, resolve_ipv4(n)), names))
+        results = pool.map(lambda n: (n, resolve_ipv4(n)), names)
 
     for name, ips in results:
         for ip in ips:
-            rows.append({"record_name": name, "ipv4": ip})
+            rows.append({
+                "record_name": name,
+                "ipv4": ip,
+                "scope": scope_of(ip),
+            })
 
-    return rows
+    return sorted(rows, key=lambda r: (r["record_name"], r["ipv4"]))
 
 
 # ---------------------------------------------------------------- CSV
@@ -132,7 +125,6 @@ def write_csv(rows, path):
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
-
     print(f"[+] CSV written: {path} ({len(rows)} IPs)")
 
 
@@ -140,25 +132,21 @@ def write_csv(rows, path):
 
 def build_pdf(rows, out_path):
     doc = SimpleDocTemplate(
-        out_path,
-        pagesize=letter,
-        leftMargin=0.75 * inch,
-        rightMargin=0.75 * inch,
-        topMargin=0.75 * inch,
-        bottomMargin=0.75 * inch,
-        title="Route 53 External-Facing IPv4 Addresses",
+        out_path, pagesize=letter,
+        leftMargin=0.75 * inch, rightMargin=0.75 * inch,
+        topMargin=0.75 * inch, bottomMargin=0.75 * inch,
+        title="Route 53 .gov A-Record IPv4 Inventory",
     )
 
     styles = getSampleStyleSheet()
-
     title_style = ParagraphStyle(
         "title", parent=styles["Title"], textColor=colors.black)
     subtitle_style = ParagraphStyle(
         "subtitle", parent=styles["Normal"], alignment=1,
         fontSize=11, textColor=colors.black)
     cell = ParagraphStyle(
-        "cell", parent=styles["Normal"], fontSize=9,
-        leading=12, textColor=colors.black)
+        "cell", parent=styles["Normal"], fontSize=9, leading=12,
+        textColor=colors.black)
 
     table_style = TableStyle([
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
@@ -178,24 +166,22 @@ def build_pdf(rows, out_path):
     story = []
     story.append(Paragraph(date.today().strftime("%B %d, %Y"), title_style))
     story.append(Paragraph(
-        "Route 53 External-Facing IPv4 Addresses", subtitle_style))
+        "Route 53 .gov A-Record IPv4 Inventory", subtitle_style))
     story.append(Spacer(1, 16))
 
-    data = [["Record", "IPv4"]]
-    for r in sorted(rows, key=lambda x: (x["record_name"], x["ipv4"])):
-        data.append([Paragraph(r["record_name"], cell), r["ipv4"]])
+    data = [["Record", "IPv4", "Scope"]]
+    for r in rows:
+        data.append([Paragraph(r["record_name"], cell), r["ipv4"], r["scope"]])
 
     table = Table(
         data,
-        colWidths=[4.6 * inch, 2.4 * inch],
-        repeatRows=1,
-        hAlign="CENTER",
+        colWidths=[3.8 * inch, 1.9 * inch, 1.3 * inch],
+        repeatRows=1, hAlign="CENTER",
     )
     table.setStyle(table_style)
 
     story.append(table)
     doc.build(story)
-
     print(f"[+] PDF written: {out_path}")
 
 
@@ -210,7 +196,7 @@ def upload_to_s3(file_path, bucket, key):
 # ---------------------------------------------------------------- Workflow
 
 def run(output_dir, s3_bucket=None, prefix="reports", upload=True, stamp=None):
-    print("[*] Starting Route 53 external-facing IPv4 lookup")
+    print("[*] Starting Route 53 .gov A-record IPv4 lookup")
 
     if stamp is None:
         stamp = date.today().strftime("%Y-%m-%d")
@@ -218,37 +204,35 @@ def run(output_dir, s3_bucket=None, prefix="reports", upload=True, stamp=None):
     os.makedirs(output_dir, exist_ok=True)
 
     names = fetch_a_record_names()
-
     if not names:
-        print("[!] No A records found")
+        print("[!] No .gov A records found")
         return {"status": "no_a_records_found"}
 
     rows = build_rows(names)
 
-    base = f"route53_external_ips_{stamp}"
+    base = f"route53_gov_ips_{stamp}"
     pdf_path = os.path.join(output_dir, f"{base}.pdf")
     csv_path = os.path.join(output_dir, f"{base}.csv")
 
     build_pdf(rows, pdf_path)
     write_csv(rows, csv_path)
 
-    pdf_key = f"{prefix}/_external-ips/{base}.pdf"
-    csv_key = f"{prefix}/_external-ips/{base}.csv"
+    pdf_key = f"{prefix}/_gov-ips/{base}.pdf"
+    csv_key = f"{prefix}/_gov-ips/{base}.csv"
 
     if upload and s3_bucket:
         upload_to_s3(file_path=pdf_path, bucket=s3_bucket, key=pdf_key)
         upload_to_s3(file_path=csv_path, bucket=s3_bucket, key=csv_key)
 
-    print(
-        f"[*] Resolved {len(names)} A-record names "
-        f"-> {len(rows)} public IPs"
-    )
+    ext = sum(1 for r in rows if r["scope"] == "external")
+    print(f"[*] {len(names)} names -> {len(rows)} IPs ({ext} external)")
     print("[+] Completed successfully")
 
     return {
         "status": "success",
         "a_records": len(names),
-        "public_ips": len(rows),
+        "ips": len(rows),
+        "external_ips": ext,
         "s3_bucket": s3_bucket,
         "pdf": pdf_path,
         "csv": csv_path,
@@ -260,27 +244,21 @@ def run(output_dir, s3_bucket=None, prefix="reports", upload=True, stamp=None):
 def lambda_handler(event, context):
     s3_bucket = os.environ["S3_BUCKET"]
     prefix = os.environ.get("S3_PREFIX", "reports")
-
-    return run(
-        output_dir="/tmp",
-        s3_bucket=s3_bucket,
-        prefix=prefix,
-        upload=True,
-    )
+    return run(output_dir="/tmp", s3_bucket=s3_bucket,
+               prefix=prefix, upload=True)
 
 
 # ---------------------------------------------------------------- Local
 
 if __name__ == "__main__":
-    # Replace the placeholder, or set S3_BUCKET in your environment.
     bucket = os.environ.get("S3_BUCKET", "REPLACE_WITH_YOUR_BUCKET_NAME")
     prefix = os.environ.get("S3_PREFIX", "reports")
 
     result = run(
-        output_dir="aws-route53-external-ips",
+        output_dir="aws-route53-gov-ips",
         s3_bucket=bucket,
         prefix=prefix,
         upload=bool(bucket),
     )
-
     print(result)
+
