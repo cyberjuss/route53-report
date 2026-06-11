@@ -544,7 +544,7 @@ if __name__ == "__main__":
     prefix = os.environ.get("S3_PREFIX", "reports")
 
     result = run_report(
-        output_dir="reports_out",
+        output_dir="aws-route53-reports",
         s3_bucket=bucket,
         prefix=prefix,
         upload=bool(bucket),
