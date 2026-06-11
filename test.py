@@ -74,13 +74,31 @@ def base_domain(record_name):
     return ".".join(parts[-2:]) if len(parts) >= 2 else record_name
 
 
+EXCLUDED_SUFFIXES = (".internal", ".com")
+
+
+def drop_excluded(rows):
+    kept = []
+    for row in rows:
+        name = row["record_name"].strip().rstrip(".").lower()
+        if name.endswith(EXCLUDED_SUFFIXES):
+            continue
+        kept.append(row)
+    return kept
+
+
 def group_gov(rows):
     merged = defaultdict(list)
 
     for row in rows:
         name = row["record_name"].strip().rstrip(".")
+        lower = name.lower()
 
-        if not name.lower().endswith(".gov"):
+        # Keep only .gov, and explicitly drop .internal / .com
+        if not lower.endswith(".gov"):
+            continue
+
+        if lower.endswith(EXCLUDED_SUFFIXES):
             continue
 
         key = (
@@ -225,6 +243,8 @@ def run_report(output_pdf, output_csv, s3_bucket=None,
     if not rows:
         print("[!] No Route 53 records found")
         return {"status": "no_records_found"}
+
+    rows = drop_excluded(rows)
 
     write_csv(rows, output_csv)
 
