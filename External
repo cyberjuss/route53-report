@@ -13,6 +13,7 @@ Runs locally (python3 external_ips.py) or as Lambda
 """
 
 import csv
+import ipaddress
 import os
 import socket
 from concurrent.futures import ThreadPoolExecutor
@@ -29,6 +30,7 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 # ---------------------------------------------------------------- Config
 
 DOMAIN_SUFFIX = ".gov"            # .gov only
+PUBLIC_ONLY = True                # keep only internet-routable (public) IPs
 socket.setdefaulttimeout(3)       # per-lookup DNS timeout
 
 CSV_FIELDS = ["record_name", "ipv4"]
@@ -82,6 +84,14 @@ def resolve_ipv4(name):
         return []
 
 
+def is_public(ip):
+    """True if the IP is globally routable (not private/reserved)."""
+    try:
+        return ipaddress.ip_address(ip).is_global
+    except ValueError:
+        return False
+
+
 def build_rows(names):
     rows = []
     with ThreadPoolExecutor(max_workers=20) as pool:
@@ -89,6 +99,8 @@ def build_rows(names):
 
     for name, ips in results:
         for ip in ips:
+            if PUBLIC_ONLY and not is_public(ip):
+                continue
             rows.append({
                 "record_name": name,
                 "ipv4": ip,
