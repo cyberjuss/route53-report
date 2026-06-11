@@ -67,6 +67,38 @@ def write_csv(rows, path):
     print(f"[+] CSV written: {path} ({len(rows)} rows)")
 
 
+def records_to_rows(records):
+    """Flatten a single domain's grouped records back into flat CSV rows."""
+    out = []
+    for name, rtype, values in records:
+        for v in values:
+            out.append({
+                "record_name": name,
+                "record_type": rtype,
+                "value": v,
+            })
+    return out
+
+
+INDEX_FIELDS = ["domain", "gov_records", "pdf_file", "csv_file"]
+
+
+def write_index_csv(produced, path):
+    """Write a top-level summary CSV: one row per domain."""
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=INDEX_FIELDS)
+        writer.writeheader()
+        for d in produced:
+            writer.writerow({
+                "domain": d["domain"],
+                "gov_records": d["records"],
+                "pdf_file": os.path.basename(d["pdf"]),
+                "csv_file": os.path.basename(d["csv"]),
+            })
+
+    print(f"[+] Index CSV written: {path} ({len(produced)} domains)")
+
+
 # ---------------------------------------------------------------- Filtering
 
 def base_domain(record_name):
@@ -123,7 +155,8 @@ def group_gov(rows):
 
 # ---------------------------------------------------------------- PDF
 
-def build_pdf(grouped, out_path):
+def build_domain_pdf(domain, records, out_path):
+    """Build a PDF containing the records for ONE domain."""
     doc = SimpleDocTemplate(
         out_path,
         pagesize=letter,
@@ -131,7 +164,7 @@ def build_pdf(grouped, out_path):
         rightMargin=0.75 * inch,
         topMargin=0.75 * inch,
         bottomMargin=0.75 * inch,
-        title="AWS Automated Route 53 Inventory Records",
+        title=f"Route 53 Inventory - {domain}",
     )
 
     styles = getSampleStyleSheet()
@@ -185,41 +218,102 @@ def build_pdf(grouped, out_path):
     story = []
 
     story.append(Paragraph(date.today().strftime("%B %d, %Y"), title_style))
-    story.append(Paragraph("AWS Automated Route 53 Inventory Records", subtitle_style))
+    story.append(Paragraph(
+        f"AWS Route 53 Inventory Records - {domain}", subtitle_style))
     story.append(Spacer(1, 16))
 
-    for domain in sorted(grouped):
-        records = sorted(grouped[domain], key=lambda r: (r[1], r[0]))
+    records = sorted(records, key=lambda r: (r[1], r[0]))
 
-        data = [
-            [domain, "", ""],
-            ["Record", "Type", "Value"]
-        ]
+    data = [
+        [domain, "", ""],
+        ["Record", "Type", "Value"]
+    ]
 
-        for name, rtype, values in records:
-            stacked = "<br/>".join(values)
+    for name, rtype, values in records:
+        stacked = "<br/>".join(values)
 
-            data.append([
-                Paragraph(name, cell),
-                rtype,
-                Paragraph(stacked, cell)
-            ])
+        data.append([
+            Paragraph(name, cell),
+            rtype,
+            Paragraph(stacked, cell)
+        ])
 
-        table = Table(
-            data,
-            colWidths=[2.4 * inch, 0.7 * inch, 3.9 * inch],
-            repeatRows=2,
-            hAlign="CENTER"
-        )
+    table = Table(
+        data,
+        colWidths=[2.4 * inch, 0.7 * inch, 3.9 * inch],
+        repeatRows=2,
+        hAlign="CENTER"
+    )
 
-        table.setStyle(table_style)
+    table.setStyle(table_style)
 
-        story.append(table)
-        story.append(Spacer(1, 18))
+    story.append(table)
 
     doc.build(story)
 
     print(f"[+] PDF written: {out_path}")
+
+
+def build_index_pdf(produced, out_path):
+    """Build a one-page summary PDF listing every domain and its count."""
+    doc = SimpleDocTemplate(
+        out_path,
+        pagesize=letter,
+        leftMargin=0.75 * inch,
+        rightMargin=0.75 * inch,
+        topMargin=0.75 * inch,
+        bottomMargin=0.75 * inch,
+        title="Route 53 Inventory - Summary Index",
+    )
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        "title", parent=styles["Title"], textColor=colors.black)
+    subtitle_style = ParagraphStyle(
+        "subtitle", parent=styles["Normal"], alignment=1,
+        fontSize=11, textColor=colors.black)
+
+    table_style = TableStyle([
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 10.5),
+        ("LINEBELOW", (0, 0), (-1, 0), 1.2, colors.black),
+        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 1), (-1, -1), 9),
+        ("TEXTCOLOR", (0, 0), (-1, -1), colors.black),
+        ("GRID", (0, 0), (-1, -1), 0.6, colors.black),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ALIGN", (1, 0), (1, -1), "CENTER"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ])
+
+    story = []
+    story.append(Paragraph(date.today().strftime("%B %d, %Y"), title_style))
+    story.append(Paragraph(
+        "AWS Route 53 Inventory - Summary Index", subtitle_style))
+    story.append(Spacer(1, 16))
+
+    data = [["Domain", "Records"]]
+    for d in produced:
+        data.append([d["domain"], str(d["records"])])
+    data.append(["TOTAL", str(sum(d["records"] for d in produced))])
+
+    table = Table(data, colWidths=[5.0 * inch, 2.0 * inch], hAlign="CENTER")
+    table.setStyle(table_style)
+    # Bold the TOTAL row
+    table.setStyle(TableStyle([
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("LINEABOVE", (0, -1), (-1, -1), 1.0, colors.black),
+    ]))
+
+    story.append(table)
+
+    doc.build(story)
+
+    print(f"[+] Index PDF written: {out_path}")
 
 
 # ---------------------------------------------------------------- S3 Upload
@@ -234,9 +328,14 @@ def upload_to_s3(file_path, bucket, key):
 
 # ---------------------------------------------------------------- Core Workflow
 
-def run_report(output_pdf, output_csv, s3_bucket=None,
-               s3_pdf_key=None, s3_csv_key=None, upload=True):
+def run_report(output_dir, s3_bucket=None, prefix="reports",
+               upload=True, stamp=None):
     print("[*] Starting Route 53 .gov DNS inventory report")
+
+    if stamp is None:
+        stamp = date.today().strftime("%Y-%m-%d")
+
+    os.makedirs(output_dir, exist_ok=True)
 
     rows = fetch_from_aws()
 
@@ -246,38 +345,74 @@ def run_report(output_pdf, output_csv, s3_bucket=None,
 
     rows = drop_excluded(rows)
 
-    write_csv(rows, output_csv)
-
     grouped = group_gov(rows)
 
     if not grouped:
         print("[!] No .gov records found")
         return {"status": "no_gov_records_found"}
 
-    total_records = sum(len(v) for v in grouped.values())
+    produced = []
 
-    print(
-        f"[*] Kept {total_records} .gov records "
-        f"across {len(grouped)} domains"
-    )
+    # One PDF + one CSV per domain.
+    for domain in sorted(grouped):
+        records = grouped[domain]
 
-    build_pdf(grouped, output_pdf)
+        base_name = f"route53_records_{domain}_{stamp}"
+
+        pdf_path = os.path.join(output_dir, f"{base_name}.pdf")
+        csv_path = os.path.join(output_dir, f"{base_name}.csv")
+
+        build_domain_pdf(domain, records, pdf_path)
+        write_csv(records_to_rows(records), csv_path)
+
+        pdf_key = f"{prefix}/{domain}/{base_name}.pdf"
+        csv_key = f"{prefix}/{domain}/{base_name}.csv"
+
+        if upload and s3_bucket:
+            upload_to_s3(file_path=pdf_path, bucket=s3_bucket, key=pdf_key)
+            upload_to_s3(file_path=csv_path, bucket=s3_bucket, key=csv_key)
+
+        produced.append({
+            "domain": domain,
+            "records": sum(len(v) for _, _, v in records),
+            "pdf": pdf_path,
+            "csv": csv_path,
+            "s3_pdf_key": pdf_key if (upload and s3_bucket) else None,
+            "s3_csv_key": csv_key if (upload and s3_bucket) else None,
+        })
+
+    total_records = sum(d["records"] for d in produced)
+
+    # Top-level summary index (PDF + CSV) listing every domain.
+    index_base = f"route53_index_{stamp}"
+    index_pdf_path = os.path.join(output_dir, f"{index_base}.pdf")
+    index_csv_path = os.path.join(output_dir, f"{index_base}.csv")
+
+    build_index_pdf(produced, index_pdf_path)
+    write_index_csv(produced, index_csv_path)
+
+    index_pdf_key = f"{prefix}/{index_base}.pdf"
+    index_csv_key = f"{prefix}/{index_base}.csv"
 
     if upload and s3_bucket:
-        upload_to_s3(file_path=output_pdf, bucket=s3_bucket, key=s3_pdf_key)
-        upload_to_s3(file_path=output_csv, bucket=s3_bucket, key=s3_csv_key)
+        upload_to_s3(file_path=index_pdf_path, bucket=s3_bucket, key=index_pdf_key)
+        upload_to_s3(file_path=index_csv_path, bucket=s3_bucket, key=index_csv_key)
+
+    print(
+        f"[*] Wrote {len(produced)} domain reports "
+        f"({total_records} .gov records total)"
+    )
 
     print("[+] Report completed successfully")
 
     return {
         "status": "success",
-        "gov_domains": len(grouped),
+        "gov_domains": len(produced),
         "gov_records": total_records,
         "s3_bucket": s3_bucket,
-        "s3_pdf_key": s3_pdf_key,
-        "s3_csv_key": s3_csv_key,
-        "pdf": output_pdf,
-        "csv": output_csv,
+        "index_pdf": index_pdf_path,
+        "index_csv": index_csv_path,
+        "files": produced,
     }
 
 
@@ -287,14 +422,10 @@ def lambda_handler(event, context):
     s3_bucket = os.environ["S3_BUCKET"]
     prefix = os.environ.get("S3_PREFIX", "reports")
 
-    stamp = date.today().strftime("%Y-%m-%d")
-
     return run_report(
-        output_pdf=f"/tmp/route53_records_{stamp}.pdf",
-        output_csv=f"/tmp/route53_records_{stamp}.csv",
+        output_dir="/tmp",
         s3_bucket=s3_bucket,
-        s3_pdf_key=f"{prefix}/route53_records_{stamp}.pdf",
-        s3_csv_key=f"{prefix}/route53_records_{stamp}.csv",
+        prefix=prefix,
         upload=True,
     )
 
@@ -307,14 +438,10 @@ if __name__ == "__main__":
     bucket = os.environ.get("S3_BUCKET", "REPLACE_WITH_YOUR_BUCKET_NAME")
     prefix = os.environ.get("S3_PREFIX", "reports")
 
-    stamp = date.today().strftime("%Y-%m-%d")
-
     result = run_report(
-        output_pdf=f"route53_records_{stamp}.pdf",
-        output_csv=f"route53_records_{stamp}.csv",
+        output_dir="reports_out",
         s3_bucket=bucket,
-        s3_pdf_key=f"{prefix}/route53_records_{stamp}.pdf",
-        s3_csv_key=f"{prefix}/route53_records_{stamp}.csv",
+        prefix=prefix,
         upload=bool(bucket),
     )
 
