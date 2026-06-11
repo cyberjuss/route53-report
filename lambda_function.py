@@ -74,13 +74,31 @@ def base_domain(record_name):
     return ".".join(parts[-2:]) if len(parts) >= 2 else record_name
 
 
+EXCLUDED_SUFFIXES = (".internal", ".com")
+
+
+def drop_excluded(rows):
+    kept = []
+    for row in rows:
+        name = row["record_name"].strip().rstrip(".").lower()
+        if name.endswith(EXCLUDED_SUFFIXES):
+            continue
+        kept.append(row)
+    return kept
+
+
 def group_gov(rows):
     merged = defaultdict(list)
 
     for row in rows:
         name = row["record_name"].strip().rstrip(".")
+        lower = name.lower()
 
-        if not name.lower().endswith(".gov"):
+        # Keep only .gov, and explicitly drop .internal / .com
+        if not lower.endswith(".gov"):
+            continue
+
+        if lower.endswith(EXCLUDED_SUFFIXES):
             continue
 
         key = (
@@ -214,24 +232,19 @@ def upload_to_s3(file_path, bucket, key):
     print(f"[+] Uploaded to s3://{bucket}/{key}")
 
 
-# ---------------------------------------------------------------- Lambda Handler
+# ---------------------------------------------------------------- Core Workflow
 
-def lambda_handler(event, context):
+def run_report(output_pdf, output_csv, s3_bucket=None,
+               s3_pdf_key=None, s3_csv_key=None, upload=True):
     print("[*] Starting Route 53 .gov DNS inventory report")
-
-    output_pdf = "/tmp/gov_dns_report.pdf"
-    output_csv = "/tmp/route53_records.csv"
-
-    s3_bucket = os.environ["S3_BUCKET"]
-    s3_key = os.environ.get("S3_KEY", "reports/gov_dns_report.pdf")
 
     rows = fetch_from_aws()
 
     if not rows:
         print("[!] No Route 53 records found")
-        return {
-            "status": "no_records_found"
-        }
+        return {"status": "no_records_found"}
+
+    rows = drop_excluded(rows)
 
     write_csv(rows, output_csv)
 
@@ -239,9 +252,7 @@ def lambda_handler(event, context):
 
     if not grouped:
         print("[!] No .gov records found")
-        return {
-            "status": "no_gov_records_found"
-        }
+        return {"status": "no_gov_records_found"}
 
     total_records = sum(len(v) for v in grouped.values())
 
@@ -252,18 +263,59 @@ def lambda_handler(event, context):
 
     build_pdf(grouped, output_pdf)
 
-    upload_to_s3(
-        file_path=output_pdf,
-        bucket=s3_bucket,
-        key=s3_key
-    )
+    if upload and s3_bucket:
+        upload_to_s3(file_path=output_pdf, bucket=s3_bucket, key=s3_pdf_key)
+        upload_to_s3(file_path=output_csv, bucket=s3_bucket, key=s3_csv_key)
 
-    print("[+] Lambda completed successfully")
+    print("[+] Report completed successfully")
 
     return {
         "status": "success",
         "gov_domains": len(grouped),
         "gov_records": total_records,
         "s3_bucket": s3_bucket,
-        "s3_key": s3_key
+        "s3_pdf_key": s3_pdf_key,
+        "s3_csv_key": s3_csv_key,
+        "pdf": output_pdf,
+        "csv": output_csv,
     }
+
+
+# ---------------------------------------------------------------- Lambda Handler
+
+def lambda_handler(event, context):
+    s3_bucket = os.environ["S3_BUCKET"]
+    prefix = os.environ.get("S3_PREFIX", "reports")
+
+    stamp = date.today().strftime("%Y-%m-%d")
+
+    return run_report(
+        output_pdf=f"/tmp/route53_records_{stamp}.pdf",
+        output_csv=f"/tmp/route53_records_{stamp}.csv",
+        s3_bucket=s3_bucket,
+        s3_pdf_key=f"{prefix}/route53_records_{stamp}.pdf",
+        s3_csv_key=f"{prefix}/route53_records_{stamp}.csv",
+        upload=True,
+    )
+
+
+# ---------------------------------------------------------------- Local Entry Point
+
+if __name__ == "__main__":
+    # Replace the placeholder below with your real bucket name, or override
+    # it at runtime with:  export S3_BUCKET=my-bucket-name
+    bucket = os.environ.get("S3_BUCKET", "REPLACE_WITH_YOUR_BUCKET_NAME")
+    prefix = os.environ.get("S3_PREFIX", "reports")
+
+    stamp = date.today().strftime("%Y-%m-%d")
+
+    result = run_report(
+        output_pdf=f"route53_records_{stamp}.pdf",
+        output_csv=f"route53_records_{stamp}.csv",
+        s3_bucket=bucket,
+        s3_pdf_key=f"{prefix}/route53_records_{stamp}.pdf",
+        s3_csv_key=f"{prefix}/route53_records_{stamp}.csv",
+        upload=bool(bucket),
+    )
+
+    print(result)
