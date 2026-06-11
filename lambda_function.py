@@ -316,6 +316,91 @@ def build_index_pdf(produced, out_path):
     print(f"[+] Index PDF written: {out_path}")
 
 
+def build_full_pdf(grouped, out_path):
+    """Build ONE combined PDF containing every domain (all on standby)."""
+    doc = SimpleDocTemplate(
+        out_path,
+        pagesize=letter,
+        leftMargin=0.75 * inch,
+        rightMargin=0.75 * inch,
+        topMargin=0.75 * inch,
+        bottomMargin=0.75 * inch,
+        title="AWS Automated Route 53 Inventory Records",
+    )
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        "title", parent=styles["Title"], textColor=colors.black)
+    subtitle_style = ParagraphStyle(
+        "subtitle", parent=styles["Normal"], alignment=1,
+        fontSize=11, textColor=colors.black)
+    cell = ParagraphStyle(
+        "cell", parent=styles["Normal"], fontSize=8.5,
+        leading=11, textColor=colors.black)
+
+    table_style = TableStyle([
+        ("SPAN", (0, 0), (-1, 0)),
+        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 10.5),
+        ("LINEBELOW", (0, 0), (-1, 0), 1.2, colors.black),
+        ("TOPPADDING", (0, 0), (-1, 0), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 7),
+
+        ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
+        ("LINEBELOW", (0, 1), (-1, 1), 1.2, colors.black),
+
+        ("FONTNAME", (0, 2), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 1), (-1, -1), 8.5),
+        ("TEXTCOLOR", (0, 0), (-1, -1), colors.black),
+        ("GRID", (0, 0), (-1, -1), 0.6, colors.black),
+        ("VALIGN", (0, 1), (-1, -1), "TOP"),
+
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 1), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 1), (-1, -1), 4),
+    ])
+
+    story = []
+    story.append(Paragraph(date.today().strftime("%B %d, %Y"), title_style))
+    story.append(Paragraph(
+        "AWS Automated Route 53 Inventory Records", subtitle_style))
+    story.append(Spacer(1, 16))
+
+    for domain in sorted(grouped):
+        records = sorted(grouped[domain], key=lambda r: (r[1], r[0]))
+
+        data = [
+            [domain, "", ""],
+            ["Record", "Type", "Value"]
+        ]
+
+        for name, rtype, values in records:
+            stacked = "<br/>".join(values)
+            data.append([
+                Paragraph(name, cell),
+                rtype,
+                Paragraph(stacked, cell)
+            ])
+
+        table = Table(
+            data,
+            colWidths=[2.4 * inch, 0.7 * inch, 3.9 * inch],
+            repeatRows=2,
+            hAlign="CENTER"
+        )
+        table.setStyle(table_style)
+
+        story.append(table)
+        story.append(Spacer(1, 18))
+
+    doc.build(story)
+
+    print(f"[+] Full PDF written: {out_path}")
+
+
 # ---------------------------------------------------------------- S3 Upload
 
 def upload_to_s3(file_path, bucket, key):
@@ -352,10 +437,13 @@ def run_report(output_dir, s3_bucket=None, prefix="reports",
         return {"status": "no_gov_records_found"}
 
     produced = []
+    all_rows = []  # accumulates every domain's rows for the combined report
 
     # One PDF + one CSV per domain.
     for domain in sorted(grouped):
         records = grouped[domain]
+
+        all_rows.extend(records_to_rows(records))
 
         base_name = f"route53_records_{domain}_{stamp}"
 
@@ -398,6 +486,21 @@ def run_report(output_dir, s3_bucket=None, prefix="reports",
         upload_to_s3(file_path=index_pdf_path, bucket=s3_bucket, key=index_pdf_key)
         upload_to_s3(file_path=index_csv_path, bucket=s3_bucket, key=index_csv_key)
 
+    # Combined "full" report (every domain together) in its own folder.
+    full_base = f"route53_records_full_{stamp}"
+    full_pdf_path = os.path.join(output_dir, f"{full_base}.pdf")
+    full_csv_path = os.path.join(output_dir, f"{full_base}.csv")
+
+    build_full_pdf(grouped, full_pdf_path)
+    write_csv(all_rows, full_csv_path)
+
+    full_pdf_key = f"{prefix}/_full/{full_base}.pdf"
+    full_csv_key = f"{prefix}/_full/{full_base}.csv"
+
+    if upload and s3_bucket:
+        upload_to_s3(file_path=full_pdf_path, bucket=s3_bucket, key=full_pdf_key)
+        upload_to_s3(file_path=full_csv_path, bucket=s3_bucket, key=full_csv_key)
+
     print(
         f"[*] Wrote {len(produced)} domain reports "
         f"({total_records} .gov records total)"
@@ -412,6 +515,8 @@ def run_report(output_dir, s3_bucket=None, prefix="reports",
         "s3_bucket": s3_bucket,
         "index_pdf": index_pdf_path,
         "index_csv": index_csv_path,
+        "full_pdf": full_pdf_path,
+        "full_csv": full_csv_path,
         "files": produced,
     }
 
