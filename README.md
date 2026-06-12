@@ -1,46 +1,71 @@
 # Route 53 DNS Inventory
 
-DNS asset visibility tooling for AWS Route 53. Runs as a scheduled Lambda — queries every hosted zone, filters to scope, and produces dated PDF and CSV reports stored in S3.
+[![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![AWS Lambda](https://img.shields.io/badge/AWS-Lambda-FF9900?logo=awslambda&logoColor=white)](https://aws.amazon.com/lambda/)
+[![AWS Route 53](https://img.shields.io/badge/AWS-Route%2053-8C4FFF?logo=amazonroute53&logoColor=white)](https://aws.amazon.com/route53/)
 
-Supports compliance asset inventories, attack surface reviews, and firewall baseline documentation.
+Automated DNS asset inventory for AWS Route 53. A scheduled Lambda function that queries every hosted zone, filters records to scope, and delivers dated PDF and CSV reports to S3.
+
+> Supports DNS visibility programs, compliance asset inventories, and attack surface documentation.
 
 ---
 
-## Scripts
+## Tools
+
+| Script | Purpose |
+|---|---|
+| [`dns_inventory.py`](#dns_inventorypy) | Full DNS record inventory across all record types, with per-domain and combined reports |
+| [`external_ips.py`](#external_ipspy) | Live A record resolution — maps hostnames to their public IPs and CIDR blocks |
+
+---
 
 ### `dns_inventory.py`
-Full record-type inventory (A, CNAME, MX, TXT, ALIAS, etc.) across all hosted zones. Filters to `.gov` scope, deduplicates, and outputs:
 
-- Per-domain PDF and CSV
-- Summary index — all domains and record counts in one view
-- Combined full report — every domain in a single file
+Inventories all record types (A, CNAME, MX, TXT, ALIAS, etc.) across every hosted zone. Filters to scope, deduplicates, and generates:
+
+- **Per-domain PDF and CSV** — one report set per root domain
+- **Summary index** — all domains and record counts in a single view
+- **Combined full report** — every domain in one document
+
+---
 
 ### `external_ips.py`
-Resolves `.gov` A records live via DNS lookup. Classifies each resolved IP as **public** (internet-routable) or private, and computes a covering CIDR block per hostname.
 
-Use this to enumerate internet-exposed endpoints and build firewall or attack surface baselines.
+Pulls A records from Route 53 then performs live DNS resolution on each hostname. For every record that resolves to a public IP:
+
+- Classifies the address as **public** (internet-routable) vs. private
+- Computes the tightest CIDR block spanning all resolved IPs for that record
+- Outputs a dated PDF and CSV: hostname → IP(s) → CIDR
+
+Useful for attack surface enumeration, firewall baselining, and identifying internet-exposed endpoints.
 
 ---
 
 ## How It Works
 
 ```
-EventBridge (scheduled trigger)
-        │
-        ▼
-  AWS Lambda
-        │
-        ├── Query Route 53 API  (paginated, all hosted zones)
-        ├── Filter and deduplicate records
-        ├── Generate PDF + CSV reports
-        └── Upload to S3  (organized by domain, date-stamped)
+EventBridge  (cron schedule)
+      │
+      ▼
+AWS Lambda
+      │
+      ├─ 1. Fetch    →  list all hosted zones + record sets via Route 53 API (paginated)
+      ├─ 2. Filter   →  scope to target domains, drop noise
+      ├─ 3. Process  →  deduplicate values, group by root domain
+      ├─ 4. Report   →  generate PDF + CSV (per-domain, index, and full)
+      └─ 5. Deliver  →  upload to S3, organized by domain and date
 ```
 
 ---
 
-## Setup
+## Deployment
 
-**Requirements:** Python 3.11 · AWS credentials · S3 bucket for report storage
+### Prerequisites
+
+- Python 3.11
+- AWS account with Route 53 hosted zones
+- S3 bucket for report storage
+- Lambda execution role with [`policy.json`](policy.json) attached
 
 ### 1. Package dependencies
 
@@ -54,13 +79,13 @@ python -m pip install reportlab `
   --abi cp311
 ```
 
-### 2. Build the deployment zip
+### 2. Create the deployment zip
 
 ```bash
 zip -r route53-report.zip dns_inventory.py external_ips.py package/
 ```
 
-### 3. Configure Lambda
+### 3. Configure the Lambda function
 
 | Setting | Value |
 |---|---|
@@ -72,14 +97,16 @@ zip -r route53-report.zip dns_inventory.py external_ips.py package/
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `S3_BUCKET` | Yes | — | Destination bucket for reports |
-| `S3_PREFIX` | No | `reports` | S3 path prefix |
+| `S3_BUCKET` | Yes | — | S3 bucket for report output |
+| `S3_PREFIX` | No | `reports` | Folder prefix within the bucket |
 
 ### 4. IAM permissions
 
 Attach [`policy.json`](policy.json) to the Lambda execution role.
 
-The policy is least-privilege: read-only on Route 53, write-only to the designated reports prefix in S3.
+Scoped to the minimum required:
+- `route53:ListHostedZones` + `route53:ListResourceRecordSets` — read-only
+- `s3:PutObject` — write access restricted to the reports prefix only
 
 ---
 
@@ -87,10 +114,10 @@ The policy is least-privilege: read-only on Route 53, write-only to the designat
 
 ```
 reports/
-├── _index/      ← Summary index (all domains + record counts)
-├── _full/       ← Combined report (all domains in one file)
-├── _gov-ips/    ← Public IP reports  (external_ips.py)
-└── <domain>/    ← Per-domain PDF + CSV  (dns_inventory.py)
+├── _index/      ←  Summary index: all domains and record counts
+├── _full/       ←  Combined report: every domain in one document
+├── _gov-ips/    ←  Public IP inventory  (external_ips.py)
+└── <domain>/    ←  Per-domain PDF + CSV  (dns_inventory.py)
 ```
 
-Each run produces files date-stamped with the current date.
+All files are date-stamped on each run.
